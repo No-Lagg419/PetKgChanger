@@ -1,101 +1,371 @@
--- PET KG CHANGER (Client-Side Visual Only)
--- Gumagana lang sa screen mo, hindi sa server
+-- PET KG CHANGER (Standalone LocalScript)
+-- Right-center GUI, slider 1x-10x, instant realistic scaling, auto KG update
+-- Client-side visual only
 
--- GUI Creation
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "PetKgChanger"
-ScreenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
-ScreenGui.ResetOnSpawn = false
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 
-local Frame = Instance.new("Frame")
-Frame.Size = UDim2.new(0, 200, 0, 150)
-Frame.Position = UDim2.new(1, -210, 0.5, -75) -- Kanang gitna
-Frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-Frame.BackgroundTransparency = 0.2
-Frame.BorderSizePixel = 0
-Frame.Parent = ScreenGui
+-- State
+local currentPet = nil
+local originalData = {} -- [instance] = {kind="BasePart"/"SpecialMesh"/"MeshPart", size=Vector3, scale=Vector3}
+local originalKG = nil
 
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 0, 25)
-Title.BackgroundTransparency = 1
-Title.Text = "PET KG CHANGER"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.Font = Enum.Font.SourceSansBold
-Title.TextSize = 18
-Title.Parent = Frame
-
--- Helper function to create a textbox
-local function createTextBox(yPos, placeholder)
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(1, -10, 0, 25)
-    box.Position = UDim2.new(0, 5, 0, yPos)
-    box.PlaceholderText = placeholder
-    box.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    box.TextColor3 = Color3.fromRGB(255, 255, 255)
-    box.Text = ""
-    box.ClearTextOnFocus = false
-    box.Parent = Frame
-    return box
+local function round2(n)
+    return math.floor(n * 100 + 0.5) / 100
 end
 
-local PetNameBox = createTextBox(30, "Pet Name")
-local SizeBox = createTextBox(60, "Size Multiplier (e.g. 2)")
-local KgBox = createTextBox(90, "KG Value")
+-- Save originals for realistic scaling
+local function saveOriginals(pet)
+    originalData = {}
+    originalKG = nil
+    if not pet then return end
 
--- Variable to store detected pet
-local currentPet = nil
-
--- Function to detect equipped pet
-local function detectPet()
-    local char = game.Players.LocalPlayer.Character
-    if not char then return end
-    for _, tool in pairs(char:GetChildren()) do
-        if tool:IsA("Tool") and tool:FindFirstChild("Handle") then
-            currentPet = tool
-            break
+    for _, obj in ipairs(pet:GetDescendants()) do
+        if obj:IsA("BasePart") and not obj:IsA("Terrain") then
+            originalData[obj] = { kind = "BasePart", size = obj.Size }
+        end
+        if obj:IsA("MeshPart") then
+            -- MeshPart has Scale property separate from Size
+            originalData[obj] = { kind = "MeshPart", size = obj.Size, meshScale = obj.Scale }
+        end
+        if obj:IsA("SpecialMesh") then
+            originalData[obj] = { kind = "SpecialMesh", scale = obj.Scale }
+        end
+        -- detect KG label (formats like "0.98 KG", "[0.98 KG]" etc)
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            local txt = tostring(obj.Text)
+            local num = string.match(txt, "([%d%.]+)%s*[Kk][Gg]")
+            if num and not originalKG then
+                originalKG = tonumber(num) or originalKG
+            end
         end
     end
+
+    -- fallback default KG if none found
+    if not originalKG then
+        originalKG = 1.00
+    end
 end
 
--- Listen for pet equip changes
-game.Players.LocalPlayer.Character.ChildAdded:Connect(function()
-    detectPet()
-end)
+-- Apply scale relative to originals (instant)
+local function applyScale(multiplier)
+    if not currentPet then return end
+    if multiplier <= 0 then return end
 
-game.Players.LocalPlayer.Character.ChildRemoved:Connect(function()
-    currentPet = nil
-end)
-
--- First detect
-detectPet()
-
--- Real-time updates
-PetNameBox:GetPropertyChangedSignal("Text"):Connect(function()
-    if currentPet and currentPet:FindFirstChild("Handle") then
-        currentPet.Name = PetNameBox.Text
+    -- Keep primary CFrame to avoid teleporting position
+    local primary = currentPet.PrimaryPart
+    local primaryCFrame
+    if primary then
+        primaryCFrame = primary.CFrame
     end
-end)
 
-SizeBox:GetPropertyChangedSignal("Text"):Connect(function()
-    if currentPet and currentPet:FindFirstChild("Handle") then
-        local sizeVal = tonumber(SizeBox.Text)
-        if sizeVal and sizeVal > 0 then
-            for _, part in pairs(currentPet.Handle:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.Size = part.Size * sizeVal
+    for inst, data in pairs(originalData) do
+        if data.kind == "BasePart" then
+            if inst and inst.Parent then
+                inst.Size = data.size * multiplier
+            end
+        elseif data.kind == "MeshPart" then
+            if inst and inst.Parent then
+                -- try to preserve meshScale if present
+                if data.meshScale then
+                    inst.Scale = data.meshScale * multiplier
+                else
+                    inst.Size = data.size * multiplier
                 end
             end
-        end
-    end
-end)
-
-KgBox:GetPropertyChangedSignal("Text"):Connect(function()
-    if currentPet then
-        -- Hanapin text label na may "KG"
-        for _, desc in pairs(currentPet:GetDescendants()) do
-            if desc:IsA("TextLabel") and string.find(desc.Text, "KG") then
-                desc.Text = KgBox.Text .. " KG"
+        elseif data.kind == "SpecialMesh" then
+            if inst and inst.Parent then
+                inst.Scale = data.scale * multiplier
             end
         end
     end
+
+    -- restore primary CFrame so model doesn't drift
+    if primary and primary.Parent and primaryCFrame then
+        -- try/catch in case scaling changed collisions
+        pcall(function()
+            currentPet:SetPrimaryPartCFrame(primaryCFrame)
+        end)
+    end
+end
+
+-- Compute KG based on volume (scale^3), rounds to 2 decimals
+local function computeKG(multiplier)
+    local base = originalKG or 1
+    local newkg = base * (multiplier ^ 3)
+    return round2(newkg)
+end
+
+-- Update KG text labels inside the pet (only those containing "KG")
+local function updateKGText(newkg)
+    if not currentPet then return end
+    for _, obj in ipairs(currentPet:GetDescendants()) do
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and string.find(tostring(obj.Text), "KG") then
+            obj.Text = tostring(newkg) .. " KG"
+        end
+    end
+end
+
+-- Auto-detect held pet (Tool in Character)
+local function detectHeldPet()
+    currentPet = nil
+    local char = LocalPlayer.Character
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and tool:FindFirstChild("Handle") then
+        currentPet = tool
+        saveOriginals(currentPet)
+    end
+end
+
+-- Detect changes (equip/unequip)
+LocalPlayer.CharacterAdded:Connect(function(char)
+    Character = char
+    char.ChildAdded:Connect(function()
+        detectHeldPet()
+    end)
+    char.ChildRemoved:Connect(function()
+        detectHeldPet()
+    end)
+    detectHeldPet()
 end)
+
+-- initial detect
+detectHeldPet()
+
+-- ---------- GUI ----------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PetKgChangerGUI"
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+screenGui.ResetOnSpawn = false
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 280, 0, 160)
+frame.Position = UDim2.new(1, -300, 0.5, -80) -- right-center
+frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+local frameCorner = Instance.new("UICorner", frame); frameCorner.CornerRadius = UDim.new(0,8)
+
+local title = Instance.new("TextLabel", frame)
+title.Size = UDim2.new(1, 0, 0, 30)
+title.Position = UDim2.new(0,0,0,0)
+title.BackgroundTransparency = 1
+title.Text = "PET KG CHANGER"
+title.TextColor3 = Color3.fromRGB(255,255,255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+
+-- slider label
+local sliderLabel = Instance.new("TextLabel", frame)
+sliderLabel.Size = UDim2.new(1, -10, 0, 20)
+sliderLabel.Position = UDim2.new(0,5,0,36)
+sliderLabel.BackgroundTransparency = 1
+sliderLabel.TextColor3 = Color3.fromRGB(200,200,200)
+sliderLabel.Text = "Size: 1.00x"
+sliderLabel.TextXAlignment = Enum.TextXAlignment.Left
+sliderLabel.Font = Enum.Font.Gotham
+sliderLabel.TextSize = 14
+
+-- slider track
+local track = Instance.new("Frame", frame)
+track.Size = UDim2.new(1, -20, 0, 14)
+track.Position = UDim2.new(0,10,0,60)
+track.BackgroundColor3 = Color3.fromRGB(60,60,60)
+track.BorderSizePixel = 0
+track.ClipsDescendants = true
+Instance.new("UICorner", track).CornerRadius = UDim.new(0,6)
+
+-- knob
+local knob = Instance.new("ImageButton", track)
+knob.Size = UDim2.new(0, 18, 1, 0)
+knob.Position = UDim2.new(0, 0, 0, 0)
+knob.BackgroundColor3 = Color3.fromRGB(0,170,255)
+knob.AutoButtonColor = false
+Instance.new("UICorner", knob).CornerRadius = UDim.new(0,9)
+
+-- min/max labels
+local minLabel = Instance.new("TextLabel", frame)
+minLabel.Size = UDim2.new(0,30,0,14)
+minLabel.Position = UDim2.new(0,10,0,78)
+minLabel.BackgroundTransparency = 1
+minLabel.Text = "1x"
+minLabel.TextColor3 = Color3.fromRGB(180,180,180)
+minLabel.Font = Enum.Font.Gotham
+minLabel.TextSize = 12
+
+local maxLabel = Instance.new("TextLabel", frame)
+maxLabel.Size = UDim2.new(0,40,0,14)
+maxLabel.Position = UDim2.new(1, -50, 0,78)
+maxLabel.BackgroundTransparency = 1
+maxLabel.Text = "10x"
+maxLabel.TextColor3 = Color3.fromRGB(180,180,180)
+maxLabel.Font = Enum.Font.Gotham
+maxLabel.TextSize = 12
+
+-- KG display label
+local kgLabel = Instance.new("TextLabel", frame)
+kgLabel.Size = UDim2.new(1, -10, 0, 26)
+kgLabel.Position = UDim2.new(0,5,0,100)
+kgLabel.BackgroundTransparency = 1
+kgLabel.Text = "KG: 1.00"
+kgLabel.TextColor3 = Color3.fromRGB(220,220,220)
+kgLabel.Font = Enum.Font.Gotham
+kgLabel.TextSize = 14
+kgLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- make draggable
+frame.Active = true
+frame.Draggable = true
+
+-- Slider logic
+local dragging = false
+local trackAbsoluteSize = 0
+local knobHalf = 0
+local minX = 0
+local maxX = 0
+local function updateSizes()
+    trackAbsoluteSize = track.AbsoluteSize.X
+    knobHalf = knob.AbsoluteSize.X / 2
+    minX = 0
+    maxX = trackAbsoluteSize - knob.AbsoluteSize.X
+end
+
+track:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateSizes)
+knob:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateSizes)
+updateSizes()
+
+local function setKnobPositionFromMultiplier(mult)
+    -- mult in [1,10]
+    local t = (mult - 1) / 9 -- 0..1
+    local x = t * maxX
+    knob.Position = UDim2.new(0, x, 0, 0)
+    sliderLabel.Text = string.format("Size: %.2fx", mult)
+    kgLabel.Text = "KG: " .. tostring(computeKG(mult))
+end
+
+local function multiplierFromPosition(x)
+    local t = math.clamp(x / maxX, 0, 1)
+    local mult = 1 + t * 9
+    return mult
+end
+
+-- initial
+setKnobPositionFromMultiplier(1)
+
+-- dragging input
+knob.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local mouseX = input.Position.X
+        local trackPos = track.AbsolutePosition.X
+        local localX = mouseX - trackPos - (knob.AbsoluteSize.X / 2)
+        localX = math.clamp(localX, minX, maxX)
+        knob.Position = UDim2.new(0, localX, 0, 0)
+        local mult = multiplierFromPosition(localX)
+        mult = math.clamp(mult, 1, 10)
+        -- apply scale immediately
+        applyScale(mult)
+        sliderLabel.Text = string.format("Size: %.2fx", mult)
+        kgLabel.Text = "KG: " .. tostring(computeKG(mult))
+        -- also update KG text inside pet
+        updateKGText(computeKG(mult))
+    end
+end)
+
+-- also support click on track to jump
+track.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        local localX = input.Position.X - track.AbsolutePosition.X - (knob.AbsoluteSize.X / 2)
+        localX = math.clamp(localX, minX, maxX)
+        knob.Position = UDim2.new(0, localX, 0, 0)
+        local mult = multiplierFromPosition(localX)
+        mult = math.clamp(mult, 1, 10)
+        applyScale(mult)
+        sliderLabel.Text = string.format("Size: %.2fx", mult)
+        kgLabel.Text = "KG: " .. tostring(computeKG(mult))
+        updateKGText(computeKG(mult))
+    end
+end)
+
+-- If pet changes, save originals
+-- We'll poll every 0.8s to detect new tool (robust across games)
+task.spawn(function()
+    while true do
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char then
+                local tool = char:FindFirstChildOfClass("Tool")
+                if tool and tool:FindFirstChild("Handle") then
+                    if currentPet ~= tool then
+                        currentPet = tool
+                        saveOriginals(currentPet)
+                        -- reset slider to 1x visually
+                        setKnobPositionFromMultiplier(1)
+                        applyScale(1)
+                        kgLabel.Text = "KG: " .. tostring(originalKG)
+                        updateKGText(originalKG)
+                    end
+                else
+                    -- no tool: clear currentPet
+                    if currentPet ~= nil then
+                        currentPet = nil
+                        originalData = {}
+                        originalKG = nil
+                        setKnobPositionFromMultiplier(1)
+                        kgLabel.Text = "KG: 1.00"
+                    end
+                end
+            end
+        end)
+        task.wait(0.8)
+    end
+end)
+
+-- safe helper to apply scale via manual multiplier input (optional)
+local function setMultiplierManual(val)
+    local v = tonumber(val)
+    if not v then return end
+    v = math.clamp(v, 1, 10)
+    -- move knob visually
+    local t = (v - 1) / 9
+    local x = t * maxX
+    knob.Position = UDim2.new(0, x, 0, 0)
+    applyScale(v)
+    sliderLabel.Text = string.format("Size: %.2fx", v)
+    kgLabel.Text = "KG: " .. tostring(computeKG(v))
+    updateKGText(computeKG(v))
+end
+
+-- Expose manual entry by double-click knob (optional)
+knob.MouseButton2Click:Connect(function()
+    -- prompt via simple text input: use a TextBox overlay
+    local prompt = Instance.new("Frame", frame)
+    prompt.Size = UDim2.new(0, 180, 0, 40)
+    prompt.Position = UDim2.new(0.5, -90, 0, 40)
+    prompt.BackgroundColor3 = Color3.fromRGB(20,20,20)
+    local prCorner = Instance.new("UICorner", prompt); prCorner.CornerRadius = UDim.new(0,6)
+    local input = Instance.new("TextBox", prompt)
+    input.Size = UDim2.new(1, -10, 1, -10)
+    input.Position = UDim2.new(0,5,0,5)
+    input.PlaceholderText = "Enter multiplier 1-10"
+    input.Text = ""
+    input.FocusLost:Connect(function()
+        setMultiplierManual(input.Text)
+        prompt:Destroy()
+    end)
+end)
+
+-- end of script
